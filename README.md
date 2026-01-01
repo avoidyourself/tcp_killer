@@ -1,5 +1,5 @@
 ```markdown
-# Hunter-Killer Suite (v2.0)
+tcp_killer (v2.0)
 
 **Advanced Forensic Intelligence & Connection Termination for Linux/macOS**
 
