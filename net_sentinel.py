@@ -301,10 +301,13 @@ class ProcessDetector:
             if is_suspicious_path(data["exe"]):
                 data["alerts"].append("ROOT_SUSPICIOUS_PATH")
         
-        # Orphaned process (ppid = 1 but not init-like)
-        if data["ppid"] == 1 and data["name"] not in ["systemd", "init", "launchd"]:
-            if not data["name"].startswith("kworker"):
-                data["alerts"].append("ORPHANED")
+        # Orphaned process check
+        # FIX: On macOS, most system daemons have PPID 1 (launchd). 
+        # We disable this check on macOS to prevent false positives.
+        if not IS_MACOS: 
+            if data["ppid"] == 1 and data["name"] not in ["systemd", "init"]:
+                if not data["name"].startswith("kworker"):
+                    data["alerts"].append("ORPHANED")
     
     def scan_all(self):
         """Scan all processes (Wrapper for OS-specific scans)."""
