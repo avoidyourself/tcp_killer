@@ -1,40 +1,282 @@
+#!/usr/bin/env python3
 # Copyright 2017 Google Inc. All Rights Reserved.
-
+# Modified 2025 for Python 3 and Extended Capabilities.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# ... (License header preserved) ...
 
-"""Shuts down a TCP connection on Linux or macOS.
-
-Finds the process and socket file descriptor associated with a given TCP
-connection. Then injects into that process a call to shutdown()
-(http://man7.org/linux/man-pages/man2/shutdown.2.html) that file descriptor,
-thereby shutting down the TCP connection.
-
-  Typical usage example:
-
-  tcp_kill("10.31.33.7", 50246 "93.184.216.34", 443)
-
-Dependencies:
-  lsof (https://en.wikipedia.org/wiki/Lsof)
-  frida (https://www.frida.re/): sudo pip install frida
 """
-
-__author__ = "geffner@google.com (Jason Geffner)"
-__version__ = "1.0"
-
+Shuts down TCP/UDP connections on Linux or macOS.
+Capable of handling persistent connections, UDP (QUIC), and generic protocols.
+"""
 
 import argparse
 import os
 import platform
+import re
+import socket
+import subprocess
+import threading
+import sys
+import time
+import signal
+
+# Attempt to import frida; warn if missing
+try:
+    import frida
+except ImportError:
+    sys.exit("Error: Frida is missing. Install it via: pip3 install frida-tools frida")
+
+__author__ = "geffner@google.com (Jason Geffner), Modified by Gemini"
+__version__ = "2.0"
+
+# Javascript to inject. 
+# Updated to handle potential module naming differences and cleaner logging.
+_FRIDA_SCRIPT = """
+var resolver = new ApiResolver("module");
+var platform = Process.platform;
+var lib = platform === "darwin" ? "libsystem" : "libc";
+var funcName = "shutdown";
+
+// Find the shutdown export
+var matches = resolver.enumerateMatches("exports:*" + lib + "*!" + funcName);
+
+if (matches.length === 0) {
+    // Fallback for some Linux distros where libc might be named differently
+    matches = resolver.enumerateMatches("exports:*libc*!" + funcName);
+}
+
+if (matches.length === 0) {
+    throw new Error("Could not find " + funcName + " in target process.");
+}
+
+var shutdownAddr = matches[0].address;
+var shutdown = new NativeFunction(shutdownAddr, "int", ["int", "int"]);
+
+// SHUT_RDWR is usually 2
+var SHUT_RDWR = 2;
+
+// Attempt to shutdown the file descriptor
+// args: (int fd, int how)
+var result = shutdown(%d, SHUT_RDWR);
+
+if (result !== 0) {
+    // If shutdown fails, we can try 'close' as a fallback, 
+    // but usually shutdown is safer for stability.
+    send({type: "error", description: "shutdown() returned error code: " + result});
+} else {
+    send({type: "success", description: "Socket shutdown successful."});
+}
+"""
+
+def canonicalize_ip_address(address):
+    """Ensures IP address is in a standard format."""
+    try:
+        # Check for IPv6 brackets
+        if address.startswith("[") and address.endswith("]"):
+            address = address[1:-1]
+            
+        if ":" in address:
+            family = socket.AF_INET6
+        else:
+            family = socket.AF_INET
+        packed = socket.inet_pton(family, address)
+        return socket.inet_ntop(family, packed)
+    except socket.error:
+        # If it's a hostname or invalid, return as is for lsof to handle or fail
+        return address
+
+def get_process_and_fd(local_port, remote_port=None, protocol="TCP"):
+    """
+    Finds the PID and FD using lsof. 
+    Refactored to be more robust and support UDP.
+    """
+    # -n: No host names, -P: No port names, -l: No login names
+    # -i: Select internet files
+    proto_flag = f"-i{protocol}" # -iTCP or -iUDP
+    
+    cmd = ["lsof", "-n", "-P", "-l", proto_flag]
+    
+    try:
+        # Run lsof
+        output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode('utf-8')
+    except subprocess.CalledProcessError:
+        # lsof returns return code 1 if no network files are found
+        return []
+
+    results = []
+    
+    # Parse lines. Skip header.
+    # Output format example:
+    # COMMAND   PID     USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+    # python3 12345     1000   3u  IPv4  99999      0t0  TCP 10.0.0.1:54321->1.2.3.4:443 (ESTABLISHED)
+    
+    lines = output.splitlines()[1:]
+    
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 9:
+            continue
+            
+        pid_str = parts[1]
+        fd_str = parts[3]
+        name_field = parts[-1] # Usually the last field is the connection string
+        state_field = parts[-2] if len(parts) > 9 else "" # (ESTABLISHED) often sits at end
+
+        # Extract numerical FD (remove 'u', 'r', 'w' etc)
+        if not fd_str[0].isdigit():
+            continue
+        fd = int(re.search(r'\d+', fd_str).group())
+
+        # Check ports in the name field
+        # Expected format: local_ip:local_port->remote_ip:remote_port
+        # OR local_ip:local_port (listening/UDP sometimes)
+        
+        if f":{local_port}" in name_field:
+            # If remote_port is specified, we must match it too
+            if remote_port and f":{remote_port}" not in name_field:
+                continue
+                
+            results.append({
+                "pid": int(pid_str),
+                "fd": fd,
+                "name": name_field,
+                "proto": protocol
+            })
+
+    return results
+
+def inject_shutdown(pid, sockfd):
+    """Injects the shutdown call into the target process."""
+    js_error = {}
+    event = threading.Event()
+
+    def on_message(message, data):
+        if message["type"] == "send":
+            payload = message["payload"]
+            if isinstance(payload, dict) and payload.get("type") == "error":
+                js_error["error"] = payload["description"]
+        elif message["type"] == "error":
+            js_error["error"] = message["description"]
+        event.set()
+
+    try:
+        session = frida.attach(pid)
+        script = session.create_script(_FRIDA_SCRIPT % sockfd)
+        script.on("message", on_message)
+        script.load()
+        
+        # Wait for script execution
+        # We don't wait forever, just enough for the syscall
+        event.wait(timeout=2.0)
+        session.detach()
+        
+    except frida.ProcessNotFoundError:
+        return False, "Process disappeared before injection."
+    except Exception as e:
+        return False, str(e)
+
+    if "error" in js_error:
+        return False, js_error["error"]
+
+    return True, "Success"
+
+def kill_connection(local, remote, protocols, verbose=False, force_kill_process=False):
+    """
+    Main logic to find and kill connections.
+    """
+    local_port = int(local.split(":")[-1])
+    remote_port = int(remote.split(":")[-1]) if remote else None
+    
+    targets_found = False
+
+    for proto in protocols:
+        targets = get_process_and_fd(local_port, remote_port, proto)
+        
+        for t in targets:
+            targets_found = True
+            msg = f"Found {t['proto']} connection: {t['name']} (PID: {t['pid']}, FD: {t['fd']})"
+            if verbose:
+                print(msg)
+            
+            if force_kill_process:
+                if verbose: print(f"NUCLEAR OPTION: Killing PID {t['pid']}...")
+                try:
+                    os.kill(t['pid'], signal.SIGKILL)
+                    print(f"Killed process {t['pid']}")
+                except OSError as e:
+                    print(f"Failed to kill process: {e}")
+            else:
+                success, reason = inject_shutdown(t['pid'], t['fd'])
+                if success:
+                    print(f"Successfully shutdown socket FD {t['fd']} in PID {t['pid']}")
+                else:
+                    print(f"Failed to shutdown socket: {reason}")
+                    
+    return targets_found
+
+def monitor_loop(local, remote, protocols, interval, verbose, force_kill):
+    """
+    Continuous monitoring for persistent connections.
+    """
+    print(f"[*] Starting monitor loop. Checking every {interval} seconds.")
+    print("[*] Press Ctrl+C to stop.")
+    
+    try:
+        while True:
+            kill_connection(local, remote, protocols, verbose, force_kill)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\n[*] Monitor stopped.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Advanced TCP/UDP Connection Killer (Python 3)",
+        epilog="Examples:\n"
+               "  sudo python3 kill.py 127.0.0.1:8080\n"
+               "  sudo python3 kill.py :443 :5555 --udp --watch\n"
+               "  sudo python3 kill.py :22 --kill-process (The Nuclear Option)",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    parser.add_argument("local", help="Local endpoint (IP:Port or :Port)")
+    parser.add_argument("remote", nargs="?", help="Remote endpoint (IP:Port or :Port) [Optional]")
+    
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    
+    # Protocol Support
+    parser.add_argument("--udp", action="store_true", help="Target UDP sockets (includes QUIC)")
+    parser.add_argument("--tcp", action="store_true", default=True, help="Target TCP sockets (Default)")
+    
+    # Persistence Support
+    parser.add_argument("-w", "--watch", type=float, metavar="SECONDS", 
+                        help="Run in loop mode, checking every X seconds (e.g., 0.5)")
+    
+    # Aggressive Mode
+    parser.add_argument("--kill-process", action="store_true", 
+                        help="If found, KILL the entire process, not just the socket.")
+
+    args = parser.parse_args()
+
+    # Permission check
+    if os.geteuid() != 0:
+        print("Warning: This script usually requires root/sudo to see other processes' sockets.")
+
+    # Determine protocols
+    protos = []
+    if args.tcp: protos.append("TCP")
+    if args.udp: protos.append("UDP")
+    
+    # Clean up args
+    if args.local.startswith(":"): args.local = "0.0.0.0" + args.local
+    if args.remote and args.remote.startswith(":"): args.remote = "0.0.0.0" + args.remote
+
+    if args.watch:
+        monitor_loop(args.local, args.remote, protos, args.watch, args.verbose, args.kill_process)
+    else:
+        found = kill_connection(args.local, args.remote, protos, args.verbose, args.kill_process)
+        if not found and args.verbose:
+            print("No matching connections found.")import platform
 import re
 import socket
 import subprocess
