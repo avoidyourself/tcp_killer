@@ -39,7 +39,7 @@ sudo python3 process_reveal.py --scan --all
 
 ---
 
-## Part 2: The Killer (`connection_killer.py`)
+## Part 2: tcp_killer (`connection_killer.py`)
 
 Once a target is identified, this script terminates its network access or its existence entirely.
 
