@@ -1,0 +1,275 @@
+# NET SENTINEL v5.0 Configuration File
+
+# =============================================================================
+# PROCESS WHITELIST
+# =============================================================================
+# Processes in this list will never be killed
+# Add critical system services and your own protected processes
+
+process_whitelist:
+  - systemd
+  - init
+  - sshd
+  - dhclient
+  - NetworkManager
+  - dbus-daemon
+  - systemd-resolved
+  - systemd-networkd
+  - systemd-logind
+  - polkitd
+  # Add your protected processes here:
+  # - your_critical_app
+
+# =============================================================================
+# SUSPICIOUS PATHS
+# =============================================================================
+# Binary locations considered suspicious
+# Processes running from these paths trigger alerts
+
+suspicious_paths:
+  - /tmp
+  - /dev/shm
+  - /var/tmp
+  - /var/run
+  # Add custom suspicious locations:
+  # - /home/*/Downloads
+
+# =============================================================================
+# NETWORK CONFIGURATION
+# =============================================================================
+
+network:
+  # Common system ports (expected listeners, won't alert)
+  common_system_ports:
+    - 22    # SSH
+    - 53    # DNS
+    - 80    # HTTP
+    - 443   # HTTPS
+    - 123   # NTP
+    - 67    # DHCP Server
+    - 68    # DHCP Client
+    - 111   # Portmapper
+    - 631   # CUPS
+    # Add your expected services:
+    # - 8080  # Your web service
+  
+  # Beaconing detection thresholds
+  beaconing:
+    min_interval: 5        # Minimum seconds between connections
+    max_interval: 120      # Maximum seconds (above this = not beaconing)
+    timing_tolerance: 0.2  # 20% deviation allowed
+    min_occurrences: 3     # Minimum connections to classify as beacon
+  
+  # Baseline comparison
+  baseline:
+    auto_save: false           # Auto-save baseline after each scan
+    ignore_localhost: true     # Don't alert on localhost connections
+    ignore_private: false      # Alert on private IP ranges (192.168.x.x, 10.x.x.x)
+
+# =============================================================================
+# PROCESS DETECTION THRESHOLDS
+# =============================================================================
+
+process_thresholds:
+  high_threads: 100          # Alert if threads > this
+  high_fds: 500              # Alert if file descriptors > this
+  high_cpu: 3600000          # Alert if CPU time > this (jiffies)
+  swap_hiding_threshold: 
+    min_swap: 10000          # KB
+    max_rss: 1000            # KB
+  high_anon_memory_pct: 80   # Alert if anonymous memory > this %
+  excessive_rwx: 5           # Alert if RWX segments > this
+
+# =============================================================================
+# MEMORY DETECTION THRESHOLDS
+# =============================================================================
+
+memory_thresholds:
+  large_shared_mem: 102400   # Alert if shared memory > this (KB)
+  high_anon_exec: 3          # Alert if executable anonymous segments > this
+
+# =============================================================================
+# DANGEROUS CAPABILITIES
+# =============================================================================
+# Linux capabilities that trigger alerts
+
+dangerous_capabilities:
+  - cap_sys_admin      # Full system administration
+  - cap_sys_ptrace     # Process debugging/injection
+  - cap_net_raw        # Raw socket access (packet crafting)
+  - cap_net_admin      # Network configuration
+  - cap_dac_override   # Bypass file permissions
+  - cap_dac_read_search # Bypass file read permissions
+  - cap_sys_module     # Kernel module loading
+  - cap_sys_boot       # System reboot
+  # Add more as needed
+
+# =============================================================================
+# PERSISTENCE DETECTION
+# =============================================================================
+
+persistence:
+  # Keywords that trigger alerts in systemd units
+  suspicious_keywords:
+    - miner
+    - bot
+    - trojan
+    - backdoor
+    - hidden
+    - rootkit
+    - payload
+    - reverse
+    - shell
+    # Add your IOCs:
+    # - malware_name
+  
+  # Scan these profile files
+  shell_profiles:
+    - ~/.bashrc
+    - ~/.bash_profile
+    - ~/.profile
+    - ~/.zshrc
+    - /etc/profile
+    - /etc/bash.bashrc
+  
+  # Scan these autostart directories
+  autostart_dirs:
+    - ~/.config/autostart
+    - /etc/xdg/autostart
+  
+  # Scan these cron locations
+  cron_dirs:
+    - /etc/cron.d
+    - /etc/cron.daily
+    - /etc/cron.hourly
+    - /etc/cron.monthly
+    - /etc/cron.weekly
+
+# =============================================================================
+# KILL BEHAVIOR
+# =============================================================================
+
+killing:
+  # Default kill method (auto, native, injection, process, block)
+  default_method: auto
+  
+  # Verify kill success
+  verify_kill: true
+  
+  # Verification timeout (seconds)
+  verify_timeout: 0.5
+  
+  # Kill process tree (children too)
+  kill_tree: true
+  
+  # Retry failed kills
+  retry_on_failure: true
+  retry_count: 3
+  retry_delay: 0.2  # seconds between retries
+  
+  # Safety checks
+  safety:
+    block_localhost: true      # Refuse to block 127.0.0.1, ::1
+    block_wildcard: true       # Refuse to block 0.0.0.0, ::
+    require_confirmation: false # Prompt before killing (interactive mode)
+
+# =============================================================================
+# OUTPUT CONFIGURATION
+# =============================================================================
+
+output:
+  # Color output (disable for log files)
+  use_colors: true
+  
+  # Verbosity level (0=quiet, 1=normal, 2=verbose, 3=debug)
+  verbosity: 1
+  
+  # Maximum connections to display
+  max_connections_display: 50
+  
+  # Maximum alerts per item to display
+  max_alerts_per_item: 3
+  
+  # Show timestamps
+  show_timestamps: true
+  
+  # Log file (empty = no logging)
+  log_file: ""
+  # Example: log_file: "/var/log/net_sentinel.log"
+
+# =============================================================================
+# BASELINE FILES
+# =============================================================================
+
+baselines:
+  process_baseline: "sentinel_baseline_v5.json"
+  network_baseline: "network_baseline_v5.json"
+  
+  # Auto-update baseline after X days
+  auto_update_days: 7
+  
+  # Keep historical baselines
+  keep_history: true
+  max_history: 5
+
+# =============================================================================
+# PERFORMANCE
+# =============================================================================
+
+performance:
+  # Scan timeout per process (seconds)
+  scan_timeout: 10
+  
+  # Parallel processing
+  use_multiprocessing: false
+  max_workers: 4
+  
+  # Cache results (for watch mode)
+  enable_cache: true
+  cache_ttl: 5  # seconds
+
+# =============================================================================
+# INTEGRATIONS
+# =============================================================================
+
+integrations:
+  # SIEM export
+  siem:
+    enabled: false
+    format: json  # json, csv, syslog
+    output_file: "/var/log/sentinel_events.json"
+  
+  # Webhook notifications
+  webhook:
+    enabled: false
+    url: ""
+    # Example: url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  
+  # Email alerts
+  email:
+    enabled: false
+    smtp_server: ""
+    smtp_port: 587
+    from_addr: ""
+    to_addr: []
+    # Example:
+    # smtp_server: "smtp.gmail.com"
+    # from_addr: "sentinel@example.com"
+    # to_addr: ["admin@example.com"]
+
+# =============================================================================
+# EXPERIMENTAL FEATURES
+# =============================================================================
+
+experimental:
+  # Enable experimental detectors (may have false positives)
+  enabled: false
+  
+  # Machine learning-based anomaly detection
+  ml_detection: false
+  
+  # Kernel module scanning
+  kernel_scanning: false
+  
+  # Network traffic analysis (requires pcap)
+  traffic_analysis: false
