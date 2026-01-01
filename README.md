@@ -1,125 +1,131 @@
 ```markdown
-# tcp_killer (v2.0)
+# Hunter-Killer Suite (v2.0)
 
-**Advanced Connection Termination for Linux & macOS**
+**Advanced Forensic Intelligence & Connection Termination for Linux/macOS**
 
-`tcp_killer` shuts down TCP and UDP connections on Linux or macOS. It finds the process and socket file descriptor associated with a given connection and injects code to shut it down.
+This suite consists of two "sister scripts" designed to work in tandem:
+1.  **`process_reveal.py` (The Hunter):** A deep-forensic scanner that identifies hidden, malicious, or anomalous processes (including those hiding in Swap or using code injection).
+2.  **`connection_killer.py` (The Killer):** A kinetic tool to sever TCP/UDP connections or terminate the processes identified by the Hunter.
 
-**New in v2.0:**
-* **Python 3 Support:** Fully modernized codebase.
-* **UDP & QUIC Support:** Now targets UDP sockets (essential for killing HTTP/3 and QUIC connections).
-* **Persistence Monitoring:** A new `--watch` mode to continuously kill connections that attempt to auto-restart.
-* **Nuclear Option:** A `--kill-process` flag to terminate the entire process if the socket cannot be closed gracefully.
+## Part 1: The Hunter (`process_reveal.py`)
 
-The functionality mimics [TCPView](https://technet.microsoft.com/en-us/sysinternals/tcpview.aspx)'s "Close Connection" and [tcpdrop](http://man.openbsd.org/tcpdrop.8)'s functionality, but with added persistence features.
+This script bypasses standard tools like `top` or `ps` to inspect raw kernel data structures (`/proc`). It is designed to expose threats that attempt to hide from the user.
 
-## Usage
+### Key Capabilities
+* **W^X Violation Detection:** Scans memory maps for segments that are both Writable and Executable (RWX)—a primary indicator of shellcode injection or process hollowing.
+* **Rootkit Hook Detection:** Scans process environments for `LD_PRELOAD` hooks used by user-land rootkits to hijack system tools.
+* **Ghost Process Detection:** Flags binaries that have been deleted from the disk (`unlinked`) but are still running in RAM.
+* **Swap Inspection:** Identifies processes hiding in Swap (high disk usage, low RAM) to evade standard memory scanners.
+* **Baselining:** Establishes a "known good" state to detect new anomalies over time.
 
-**Note:** This script usually requires `sudo` (root privileges) to inspect and inject into processes owned by other users.
+### Usage
+
+**Note:** Must be run as root (`sudo`) to inspect memory maps and other users' processes.
 
 ```bash
-sudo python3 tcp_killer.py [options] <local endpoint> [remote endpoint]
+# 1. Establish a Baseline (Record "Normal" State)
+sudo python3 process_reveal.py --baseline
+
+# 2. Forensic Scan (Show only anomalies/threats)
+sudo python3 process_reveal.py --scan
+
+# 3. Diff Scan (Compare current state to Baseline)
+sudo python3 process_reveal.py --diff
+
+# 4. Full Dump (Show all processes with forensic data)
+sudo python3 process_reveal.py --scan --all
 
 ```
 
-### Arguments
+---
 
-| Argument | Description |
-| --- | --- |
-| `local endpoint` | The local IP address and port (e.g., `127.0.0.1:8080` or `:8080`). |
-| `remote endpoint` | (Optional) The remote IP address and port. If omitted, it targets *any* connection on the local port. |
-| `-v`, `--verbose` | Show verbose output (PID, FD details). |
-| `--udp` | Target UDP sockets (includes QUIC/HTTP3). |
-| `--tcp` | Target TCP sockets (Default if unspecified). |
-| `-w`, `--watch SECONDS` | Run in a loop, checking for the connection every X seconds. |
-| `--kill-process` | **Aggressive:** If the connection is found, kill the entire process (SIGKILL) instead of just closing the socket. |
+## Part 2: The Killer (`connection_killer.py`)
 
-## Examples
+Once a target is identified, this script terminates its network access or its existence entirely.
 
-### 1. Basic TCP Kill
+### Key Capabilities
 
-Shut down a specific TCP connection between local port 50246 and remote port 443.
+* **Protocol Agnostic:** Targets TCP and UDP (essential for killing QUIC/HTTP3).
+* **Persistence Countermeasure:** The `--watch` mode creates a loop to instantly kill connections that attempt to auto-restart (DoS the malware).
+* **The Nuclear Option:** The `--kill-process` flag bypasses socket shutdown and sends a `SIGKILL` to the process itself.
+
+### Usage
 
 ```bash
-sudo python3 tcp_killer.py 10.31.33.7:50246 93.184.216.34:443
+# 1. Kill a specific connection (TCP default)
+sudo python3 connection_killer.py 192.168.1.50:443
+
+# 2. Kill a UDP/QUIC connection on port 443
+sudo python3 connection_killer.py :443 --udp
+
+# 3. Persistence Mode (Stop auto-restarting connections)
+sudo python3 connection_killer.py :8080 --watch 0.5
+
+# 4. The Nuclear Option (Kill the process found by process_reveal.py)
+# If process_reveal showed a threat on port 4444:
+sudo python3 connection_killer.py :4444 --kill-process
 
 ```
 
-### 2. Kill UDP / QUIC Connections
+---
 
-Shut down any UDP connection on port 443 (effectively killing QUIC/HTTP3 traffic on that port).
+## The Hunter-Killer Workflow
 
-```bash
-sudo python3 tcp_killer.py :443 --udp
+**Step 1: Intelligence**
+Run `process_reveal.py` to find the threat.
 
-```
-
-### 3. Persistence Mode (Anti-Auto-Restart)
-
-Continuously monitor for a connection on port 8080 and kill it every 0.5 seconds. Useful for stopping services that immediately reconnect.
-
-```bash
-sudo python3 tcp_killer.py :8080 --watch 0.5
+```text
+PID     USER      ALERTS                         PROCESS
+1337    www-data  [RWX_ANONYMOUS] | [SWAP_HIDER] /usr/bin/python3 (deleted)
 
 ```
 
-### 4. The "Nuclear Option"
-
-If a malware beacon or stubborn process refuses to drop the connection, this finds the process attached to the remote IP `192.168.1.50` and kills the process entirely.
+**Step 2: Verification**
+Check if PID 1337 has an active connection.
 
 ```bash
-sudo python3 tcp_killer.py 0.0.0.0:0 192.168.1.50:80 --kill-process
+sudo lsof -p 1337
+# Output shows connection to 93.184.216.34:443
 
 ```
 
-## Full Walkthrough
+**Step 3: Termination**
+Use `connection_killer.py` to end it.
 
 ```bash
-geffner@ubuntu:~$ # 1. Create a persistent listener (simulating a service)
-geffner@ubuntu:~$ nc -l -u -p 9999 &
-[1] 135578
-
-geffner@ubuntu:~$ # 2. Verify it is running
-geffner@ubuntu:~$ sudo lsof -i :9999
-COMMAND   PID    USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
-nc      135578 geffner   3u  IPv4 999999      0t0  UDP *:9999
-
-geffner@ubuntu:~$ # 3. Kill it using tcp_killer (targeting UDP)
-geffner@ubuntu:~$ sudo python3 tcp_killer.py :9999 --udp --verbose
-Found UDP connection: *:9999 (PID: 135578, FD: 3)
-Successfully shutdown socket FD 3 in PID 135578
-
-geffner@ubuntu:~$ # 4. Verify the socket is gone
-geffner@ubuntu:~$ sudo lsof -i :9999
-(No output - connection closed)
+sudo python3 connection_killer.py :443 --kill-process
 
 ```
 
-## Dependencies
+---
 
-### Python 3 & Lsof
+## Installation & Dependencies
 
-Ensure you have Python 3 and `lsof` installed.
+Both scripts require **Python 3**.
 
+1. **System Tools:**
 ```bash
+# Ubuntu/Debian
 sudo apt-get install python3 lsof
-# or on macOS
+
+# macOS
 brew install lsof
 
 ```
 
-### Frida
 
-This program uses [frida](https://www.frida.re/) for dynamic binary instrumentation (code injection).
-
+2. **Python Libraries:**
+The Killer script utilizes Frida for socket injection (optional if only using `--kill-process`).
 ```bash
 pip3 install frida-tools frida
 
 ```
 
+
+
 ## Disclaimer
 
-This is not an official Google product. Use responsibly and only on systems you own or have permission to manage.
+These tools are powerful. `process_reveal.py` exposes raw system internals, and `connection_killer.py` can disrupt system stability if used on critical daemon processes. Use responsibly and only on systems you own or are authorized to secure.
 
 ```
 
