@@ -73,6 +73,7 @@ except ImportError:
 # CONFIGURATION & GLOBALS
 # =============================================================================
 
+IS_MACOS = sys.platform == "darwin"
 BASELINE_FILE = "sentinel_baseline_v5.json"
 NETWORK_BASELINE = "network_baseline_v5.json"
 
@@ -88,7 +89,10 @@ RESET = "\033[0m"
 # Whitelisted processes (won't be killed)
 PROCESS_WHITELIST = {
     "systemd", "init", "sshd", "dhclient", "NetworkManager",
-    "dbus-daemon", "systemd-resolved", "systemd-networkd"
+    "dbus-daemon", "systemd-resolved", "systemd-networkd",
+    # macOS additions to whitelist to prevent instability
+    "launchd", "kernel_task", "WindowServer", "loginwindow", 
+    "UserEventAgent", "coreaudiod", "syslogd", "rapportd"
 }
 
 # Suspicious binary locations
@@ -149,7 +153,7 @@ class ProcessDetector:
         self.baseline = {}
         
     def scan_process(self, pid):
-        """Deep scan of a single process."""
+        """Deep scan of a single process (Linux-Specific Logic Preserved)."""
         p_path = f"/proc/{pid}"
         if not os.path.exists(p_path):
             return None
@@ -287,7 +291,7 @@ class ProcessDetector:
                 data["alerts"].append(f"DANGEROUS_CAP:{cap}")
         
         # Process name spoofing (name doesn't match exe)
-        if data["exe"] and data["name"] != "?":
+        if data["exe"] and data["name"] != "?" and not IS_MACOS:
             exe_name = os.path.basename(data["exe"]).split()[0]
             if exe_name != data["name"] and not data["exe"].endswith("(deleted)"):
                 data["alerts"].append("NAME_SPOOF")
@@ -298,18 +302,74 @@ class ProcessDetector:
                 data["alerts"].append("ROOT_SUSPICIOUS_PATH")
         
         # Orphaned process (ppid = 1 but not init-like)
-        if data["ppid"] == 1 and data["name"] not in ["systemd", "init"]:
+        if data["ppid"] == 1 and data["name"] not in ["systemd", "init", "launchd"]:
             if not data["name"].startswith("kworker"):
                 data["alerts"].append("ORPHANED")
     
     def scan_all(self):
-        """Scan all processes."""
+        """Scan all processes (Wrapper for OS-specific scans)."""
+        if IS_MACOS:
+            return self._scan_macos_ps()
+        else:
+            return self._scan_all_linux()
+
+    def _scan_all_linux(self):
+        """Original Linux /proc scanning."""
         pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
         results = {}
         for pid in pids:
             info = self.scan_process(pid)
             if info:
                 results[str(pid)] = info
+        return results
+
+    def _scan_macos_ps(self):
+        """macOS process scanning via ps (Added Feature)."""
+        results = {}
+        # Get standard fields: pid, ppid, user, rss, state, comm
+        cmd = "ps -ax -o pid,ppid,user,rss,state,command"
+        output = run_cmd(cmd)
+        if not output: return {}
+
+        lines = output.splitlines()[1:]
+        for line in lines:
+            try:
+                # Basic split (command can have spaces, so we limit split)
+                parts = line.strip().split(None, 5)
+                if len(parts) < 6: continue
+                
+                pid = int(parts[0])
+                ppid = int(parts[1])
+                user = parts[2]
+                rss = int(parts[3])
+                state = parts[4]
+                cmd_full = parts[5]
+                exe = cmd_full.split()[0]
+                
+                data = {
+                    "pid": pid,
+                    "name": os.path.basename(exe),
+                    "ppid": ppid,
+                    "uid": -1, # Hard to get efficiently in bulk on macOS without extra calls
+                    "user": user,
+                    "state": state,
+                    "threads": 0,
+                    "fds": 0,
+                    "rss": rss,
+                    "swap": 0,
+                    "cpu_time": 0,
+                    "exe": exe,
+                    "cmdline": cmd_full,
+                    "cwd": "",
+                    "capabilities": [],
+                    "alerts": []
+                }
+                
+                # Run standard anomaly checks (some fields may be empty on macOS)
+                self._check_anomalies(data)
+                results[str(pid)] = data
+            except:
+                continue
         return results
 
 # =============================================================================
@@ -321,6 +381,8 @@ class MemoryDetector:
     
     def scan_memory(self, pid):
         """Scan process memory for anomalies."""
+        if IS_MACOS: return [] # Memory mapping via /proc is Linux-only
+
         maps_path = f"/proc/{pid}/maps"
         if not os.path.exists(maps_path):
             return []
@@ -387,6 +449,8 @@ class MemoryDetector:
     
     def scan_shared_memory(self, pid):
         """Check shared memory segments."""
+        if IS_MACOS: return [] # Shared memory stats via /proc is Linux-only
+
         smaps_path = f"/proc/{pid}/smaps"
         if not os.path.exists(smaps_path):
             return []
@@ -422,7 +486,14 @@ class NetworkDetector:
         self.connection_history = defaultdict(list)
     
     def scan_connections(self):
-        """Scan all network connections using /proc/net."""
+        """Scan all network connections (Wrapper for OS-specific scans)."""
+        if IS_MACOS:
+            return self._scan_macos_lsof()
+        else:
+            return self._scan_connections_linux()
+
+    def _scan_connections_linux(self):
+        """Original Scan using /proc/net."""
         connections = []
         
         # Parse TCP
@@ -434,6 +505,92 @@ class NetworkDetector:
         connections.extend(self._parse_net_file("/proc/net/udp6", "UDP6", True))
         
         return connections
+
+    def _scan_macos_lsof(self):
+        """macOS Scan using lsof (Added Feature)."""
+        connections = []
+        # Command: lsof -n (no host names) -P (no port names) -i (internet files)
+        cmd = ["lsof", "-n", "-P", "-iTCP", "-iUDP"]
+        
+        try:
+            output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode('utf-8')
+        except subprocess.CalledProcessError:
+            return []
+
+        lines = output.splitlines()[1:] # Skip header
+        
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 8: continue
+            
+            try:
+                command = parts[0]
+                pid = int(parts[1])
+                user = parts[2]
+                proto = parts[7] # TCP or UDP
+                name_field = parts[8]
+                state = "UNCONN"
+                
+                if len(parts) > 9:
+                    state = parts[9].strip("()") # (ESTABLISHED) -> ESTABLISHED
+                
+                if proto == "TCP" and state == "UNCONN":
+                    state = "LISTEN"
+
+                # Parse Local/Remote from name_field
+                local_addr, local_port = "0.0.0.0", 0
+                remote_addr, remote_port = "0.0.0.0", 0
+
+                if "->" in name_field:
+                    local_part, remote_part = name_field.split("->")
+                    local_addr, local_port = self._parse_ip_port_str(local_part)
+                    remote_addr, remote_port = self._parse_ip_port_str(remote_part)
+                else:
+                    # Listening or UDP
+                    local_addr, local_port = self._parse_ip_port_str(name_field)
+                
+                if local_port == 0: continue
+
+                conn = {
+                    "proto": proto,
+                    "local_addr": local_addr,
+                    "local_port": local_port,
+                    "remote_addr": remote_addr,
+                    "remote_port": remote_port,
+                    "state": state,
+                    "uid": -1, 
+                    "user": user,
+                    "inode": 0,
+                    "pid": pid,
+                    "process": command,
+                    "alerts": []
+                }
+                
+                self._analyze_connection(conn)
+                connections.append(conn)
+
+            except Exception as e:
+                continue
+                
+        return connections
+
+    def _parse_ip_port_str(self, s):
+        """Helper to split IP:Port string safely for lsof."""
+        try:
+            if s == "*": return "0.0.0.0", 0
+            # Handle IPv6 [addr]:port
+            if "]:" in s:
+                ip = s.split("]:")[0][1:]
+                port = int(s.split("]:")[1])
+            elif ":" in s:
+                parts = s.rsplit(":", 1)
+                ip = parts[0]
+                port = int(parts[1])
+            else:
+                return s, 0
+            return ip, port
+        except:
+            return "0.0.0.0", 0
     
     def _parse_net_file(self, path, proto, ipv6):
         """Parse /proc/net/tcp or /proc/net/udp."""
@@ -656,7 +813,11 @@ class PersistenceDetector:
         """Scan all persistence mechanisms."""
         findings = []
         
-        findings.extend(self.scan_systemd())
+        if IS_MACOS:
+             findings.extend(self.scan_macos_launchd())
+        else:
+             findings.extend(self.scan_systemd())
+             
         findings.extend(self.scan_cron())
         findings.extend(self.scan_shell_profiles())
         findings.extend(self.scan_autostart())
@@ -682,6 +843,33 @@ class PersistenceDetector:
                         "severity": "HIGH"
                     })
         
+        return findings
+
+    def scan_macos_launchd(self):
+        """Scan macOS LaunchAgents/Daemons (Added Feature)."""
+        findings = []
+        dirs = [
+            os.path.expanduser("~/Library/LaunchAgents"),
+            "/Library/LaunchAgents",
+            "/Library/LaunchDaemons"
+        ]
+        for d in dirs:
+            if not os.path.exists(d): continue
+            try:
+                for f in os.listdir(d):
+                    if f.endswith(".plist"):
+                        path = os.path.join(d, f)
+                        try:
+                            with open(path, 'r', errors='ignore') as pfile:
+                                content = pfile.read()
+                                if any(s in content for s in SUSPICIOUS_PATHS):
+                                    findings.append({
+                                        "type": "LAUNCH_ITEM",
+                                        "detail": f"{f} contains suspicious path",
+                                        "severity": "MEDIUM"
+                                    })
+                        except: pass
+            except: pass
         return findings
     
     def scan_cron(self):
@@ -806,6 +994,7 @@ class ConnectionKiller:
         self.has_ss = shutil.which("ss") is not None
         self.has_iptables = shutil.which("iptables") is not None
         self.has_ip6tables = shutil.which("ip6tables") is not None
+        self.has_pfctl = shutil.which("pfctl") is not None
     
     def kill_connection(self, conn, method="auto", verify=True):
         """
@@ -813,20 +1002,24 @@ class ConnectionKiller:
         Methods: auto, native, injection, process, block
         """
         if method == "auto":
-            # Try native first, fallback to injection
-            if self.has_ss and conn["proto"].startswith("TCP"):
+            # Try native first (Linux)
+            if not IS_MACOS and self.has_ss and conn["proto"].startswith("TCP"):
                 success = self._native_kill(conn)
                 if success and verify:
                     time.sleep(0.1)
                     if self._verify_killed(conn):
                         return True, "Native kill successful"
             
-            # Fallback to injection
+            # Fallback to injection (Universal if Frida installed)
             if conn["pid"] and FRIDA_AVAILABLE:
                 success = self._injection_kill(conn)
                 if success:
                     return True, "Injection kill successful"
             
+            # Fallback to process kill
+            if conn["pid"]:
+                return self._process_kill(conn), "Process kill (Fallback)"
+
             return False, "All kill methods failed"
         
         elif method == "native":
@@ -843,7 +1036,7 @@ class ConnectionKiller:
     
     def _native_kill(self, conn):
         """Kill using ss -K."""
-        if not self.has_ss:
+        if IS_MACOS or not self.has_ss:
             return False
         
         if conn["state"] == "LISTEN":
@@ -866,7 +1059,11 @@ class ConnectionKiller:
             return False
         
         # Find socket FD
-        fd = self._find_socket_fd(conn["pid"], conn["inode"])
+        if IS_MACOS:
+            fd = self._find_socket_fd_macos(conn["pid"], conn["local_port"], conn["remote_port"])
+        else:
+            fd = self._find_socket_fd(conn["pid"], conn["inode"])
+            
         if not fd:
             return False
         
@@ -874,7 +1071,7 @@ class ConnectionKiller:
         return self._inject_shutdown(conn["pid"], fd)
     
     def _find_socket_fd(self, pid, inode):
-        """Find socket file descriptor."""
+        """Find socket file descriptor (Linux)."""
         fd_path = f"/proc/{pid}/fd"
         if not os.path.exists(fd_path):
             return None
@@ -887,6 +1084,29 @@ class ConnectionKiller:
         except:
             pass
         
+        return None
+
+    def _find_socket_fd_macos(self, pid, local_port, remote_port):
+        """Find socket FD using lsof on macOS (Added Feature)."""
+        try:
+            cmd = ["lsof", "-n", "-P", "-p", str(pid), "-a", "-i"]
+            output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode('utf-8')
+            lines = output.splitlines()[1:]
+            for line in lines:
+                # python 123 root 3u ... name
+                parts = line.split()
+                if len(parts) < 9: continue
+                fd_str = parts[3]
+                name = parts[8]
+                
+                # Check ports in name (Basic matching)
+                if f":{local_port}" in name:
+                     # Remove 'u' from '3u'
+                     if fd_str[:-1].isdigit():
+                         return int(fd_str[:-1])
+                     if fd_str.isdigit():
+                         return int(fd_str)
+        except: pass
         return None
     
     def _inject_shutdown(self, pid, sockfd):
@@ -936,8 +1156,11 @@ class ConnectionKiller:
             return False
         
         try:
-            # Kill process tree
-            self._kill_process_tree(conn["pid"])
+            # Kill process tree (Linux only for deep tree kill, simple kill on Mac)
+            if not IS_MACOS:
+                self._kill_process_tree(conn["pid"])
+            else:
+                os.kill(conn["pid"], signal.SIGKILL)
             return True
         except:
             return False
@@ -973,10 +1196,17 @@ class ConnectionKiller:
             pass
     
     def _firewall_block(self, conn):
-        """Block using iptables."""
+        """Block using iptables or pfctl (Wrapper)."""
         if conn["remote_addr"] in ["0.0.0.0", "127.0.0.1", "::", "::1"]:
             return False
         
+        if IS_MACOS:
+            return self._macos_pf_block(conn["remote_addr"])
+        else:
+            return self._firewall_block_linux(conn)
+
+    def _firewall_block_linux(self, conn):
+        """Original Linux iptables block."""
         is_ipv6 = ":" in conn["remote_addr"]
         iptables = "ip6tables" if is_ipv6 else "iptables"
         
@@ -997,6 +1227,34 @@ class ConnectionKiller:
             
             return True
         except:
+            return False
+
+    def _macos_pf_block(self, ip):
+        """Block IP using macOS Packet Filter (Added Feature)."""
+        if not self.has_pfctl: return False
+        ANCHOR = "com.sentinel.block"
+        print(f"[*] Adding PF rule for {ip}...")
+        
+        # Create temp rule
+        rule = f"block drop out proto tcp from any to {ip}\n"
+        rule += f"block drop out proto udp from any to {ip}\n"
+        
+        try:
+            with open("/tmp/sentinel_pf.conf", "w") as f:
+                f.write(rule)
+            
+            # Load into anchor
+            cmd = f"sudo pfctl -a {ANCHOR} -f /tmp/sentinel_pf.conf"
+            subprocess.run(cmd, shell=True, check=True)
+            
+            # Enable
+            subprocess.run("sudo pfctl -e", shell=True, stderr=subprocess.DEVNULL)
+            
+            # Kill states
+            subprocess.run(f"sudo pfctl -k {ip}", shell=True, stderr=subprocess.DEVNULL)
+            return True
+        except Exception as e:
+            print(f"PF Error: {e}")
             return False
     
     def _verify_killed(self, conn):
@@ -1027,7 +1285,7 @@ def format_alerts(alerts):
 def display_process_scan(processes, show_all=False):
     """Display process scan results."""
     print("\n" + "="*120)
-    print(f"{BOLD}PROCESS FORENSICS{RESET}")
+    print(f"{BOLD}PROCESS FORENSICS ({'macOS' if IS_MACOS else 'Linux'}){RESET}")
     print("="*120)
     print(f"{'PID':<7} {'USER':<10} {'STATE':<6} {'THR':<5} {'FDS':<5} {'ALERTS':<40} {'PROCESS'}")
     print("-"*120)
@@ -1112,8 +1370,9 @@ def display_persistence_scan(findings):
 
 def run_full_scan(show_all=False):
     """Run comprehensive system scan."""
-    print(f"{CYAN}{BOLD}NET SENTINEL v5.0 - Full System Scan{RESET}")
+    print(f"{CYAN}{BOLD}NET SENTINEL v5.0 - Universal System Scan{RESET}")
     print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Platform: {platform.system()} {platform.release()}")
     
     # Process scan
     print(f"\n{CYAN}[1/4] Scanning processes...{RESET}")
@@ -1294,4 +1553,3 @@ EXAMPLES:
     else:
         # Default: full scan
         run_full_scan(args.all)
-        
