@@ -18,7 +18,6 @@ sudo yum install python3 python3-pip lsof iproute iptables
 **macOS**:
 ```bash
 brew install python3 lsof
-# Note: Limited functionality on macOS (no ss, no iptables)
 ```
 
 ### 2. Install Python Dependencies
