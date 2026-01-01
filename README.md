@@ -1,10 +1,9 @@
-# NET SENTINEL v5.0 - Advanced Documentation
-
+# Google - TCP Killer succesor
 ## Complete Detection & Termination Capabilities
 
 ### Overview
 
-NET SENTINEL is a comprehensive security tool that combines deep system forensics with surgical network connection termination. It goes beyond traditional tools like `ps`, `netstat`, and `lsof` to detect sophisticated threats.
+This project is a comprehensive security tool that combines deep system forensics with surgical network connection termination. It goes beyond traditional tools like `ps`, `netstat`, and `lsof` to detect sophisticated threats.
 
 ---
 
