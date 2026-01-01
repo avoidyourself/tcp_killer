@@ -1,142 +1,643 @@
-```markdown
-# tcp_killer
+# NET SENTINEL v5.0 - Advanced Documentation
 
-**Author:** Jason Geffner (Google)
-**Modifications:** v2.0 (Python 3 Port, UDP Support, Persistence, Process Forensics)
-**License:** Apache License, Version 2.0
+## Complete Detection & Termination Capabilities
 
-`tcp_killer` shuts down TCP and UDP connections on Linux or macOS. It finds the process and socket file descriptor associated with a given connection and injects code to shut it down.
+### Overview
 
-This repository now includes `proc_scanner.py`, a sister script designed for deep process forensics to aid in identifying targets for `tcp_killer`.
+NET SENTINEL is a comprehensive security tool that combines deep system forensics with surgical network connection termination. It goes beyond traditional tools like `ps`, `netstat`, and `lsof` to detect sophisticated threats.
 
-## 1. tcp_killer.py
+---
 
-The functionality offered by *tcp_killer* is intended to mimic [TCPView](https://technet.microsoft.com/en-us/sysinternals/tcpview.aspx)'s "Close Connection" functionality and [tcpdrop](http://man.openbsd.org/tcpdrop.8)'s functionality on Linux and macOS.
+## Detection Capabilities
 
-### Modifications in v2.0
-* **Python 3:** Codebase fully modernized for Python 3.
-* **UDP & QUIC Support:** Added `--udp` flag to target UDP sockets (essential for killing HTTP/3 and QUIC connections).
-* **Persistence Monitoring:** Added `--watch` mode to continuously kill connections that attempt to auto-restart.
-* **Process Termination:** Added `--kill-process` flag to terminate the entire process if the socket cannot be closed gracefully.
+### 1. Process Analysis
 
-### Usage
+#### Basic Detection
+- **Process metadata**: PID, PPID, UID, state, threads, file descriptors
+- **Memory usage**: RSS (RAM), Swap usage
+- **CPU utilization**: Cumulative CPU time tracking
+- **Binary path resolution**: Full executable path tracking
 
-**Note:** This script usually requires `sudo` (root privileges) to inspect and inject into processes owned by other users.
+#### Advanced Detection
 
-`sudo python3 tcp_killer.py [options] <local endpoint> [remote endpoint]`
+**Memory Anomalies**:
+- W^X violations (Read-Write-Execute segments)
+- Anonymous executable memory (process injection signature)
+- RWX on stack/heap (shellcode indicators)
+- Excessive RWX segments
+- High anonymous memory percentage
+- Large shared memory segments
 
-#### Arguments
+**Process Behavior**:
+- High thread counts (> 100 threads)
+- Excessive file descriptors (> 500 FDs)
+- Swap hiding (high swap, low RSS)
+- CPU usage spikes
+- Process name spoofing (name vs exe mismatch)
+- Orphaned processes (PPID = 1, non-init)
 
-| Argument | Description |
-| :--- | :--- |
-| `<local endpoint>` | The local IP address and port (e.g., `127.0.0.1:8080` or `:8080`). |
-| `<remote endpoint>` | (Optional) The remote IP address and port. If omitted, it targets *any* connection on the local port. |
-| `-v`, `--verbose` | Show verbose output (PID, FD details). |
-| `--udp` | Target UDP sockets (includes QUIC/HTTP3). |
-| `--tcp` | Target TCP sockets (Default if unspecified). |
-| `-w`, `--watch SECONDS` | Run in a loop, checking for the connection every X seconds. |
-| `--kill-process` | **Aggressive:** If the connection is found, kill the entire process (SIGKILL) instead of just closing the socket. |
+**Binary Location**:
+- Deleted binaries (running from RAM only)
+- Suspicious paths (/tmp, /dev/shm, /var/tmp)
+- Hidden directories (dot-prefixed)
+- Root processes in suspicious locations
 
-#### Examples
+**Permissions & Capabilities**:
+- Dangerous Linux capabilities:
+  - CAP_SYS_ADMIN (full system control)
+  - CAP_SYS_PTRACE (process debugging)
+  - CAP_NET_RAW (packet crafting)
+  - CAP_NET_ADMIN (network config)
+  - CAP_DAC_OVERRIDE (file permission bypass)
+  - CAP_DAC_READ_SEARCH (file read bypass)
 
-**Basic TCP Kill**
-Shut down a specific TCP connection between local port 50246 and remote port 443.
+---
+
+### 2. Network Analysis
+
+#### Connection State Tracking
+Monitors all TCP/UDP connection states:
+- ESTABLISHED (active connections)
+- LISTEN (listening services)
+- SYN_SENT (outbound connection attempts)
+- SYN_RECV (inbound connection attempts)
+- FIN_WAIT1/FIN_WAIT2 (graceful close)
+- TIME_WAIT (connection cooldown)
+- CLOSE_WAIT (zombie connections)
+- CLOSE (closed connections)
+- LAST_ACK (final acknowledgment)
+- CLOSING (simultaneous close)
+
+#### Behavioral Analysis
+
+**Port Binding Detection**:
+- LISTEN on 0.0.0.0 (all interfaces) for non-standard ports
+- High port listeners (> 50000)
+- Unusual system port usage
+
+**Connection Patterns**:
+- Beaconing detection (periodic C2 communications)
+  - Analyzes connection timing intervals
+  - Detects regular patterns (5s - 2min intervals)
+  - < 20% timing deviation = probable C2
+- Connection state anomalies
+- Excessive SYN_SENT (port scanning)
+- CLOSE_WAIT zombies (resource leaks)
+
+**Baseline Comparison**:
+- Tracks normal network destinations per process
+- Identifies new/unusual connections
+- Flags deviation from established patterns
+
+**Protocol Coverage**:
+- TCP (IPv4 and IPv6)
+- UDP (IPv4 and IPv6)
+- All connection states
+
+---
+
+### 3. Memory Forensics
+
+#### Memory Mapping Analysis
+Parses `/proc/[pid]/maps` for:
+- Permission violations (RWX segments)
+- Anonymous memory regions
+- Executable anonymous memory
+- Memory-mapped files from suspicious paths
+- Stack/heap execution
+
+#### Shared Memory Analysis
+Analyzes `/proc/[pid]/smaps` for:
+- Large shared memory segments (> 100MB)
+- Shared_Clean and Shared_Dirty tracking
+- Inter-process communication patterns
+
+#### Memory Growth Tracking
+- Monitors memory allocation over time
+- Detects rapid memory expansion
+- Identifies memory leaks or data staging
+
+---
+
+### 4. Persistence Detection
+
+#### Startup Mechanisms
+
+**Systemd Units**:
+- Scans all systemd services
+- Identifies suspicious service names
+- Keywords: miner, bot, trojan, backdoor, hidden
+
+**Cron Jobs**:
+- System crontabs (/etc/cron.*)
+- User crontabs
+- Detects jobs with suspicious paths
+
+**Shell Profiles**:
+- ~/.bashrc, ~/.bash_profile, ~/.profile
+- ~/.zshrc
+- /etc/profile, /etc/bash.bashrc
+- Detects LD_PRELOAD hooks
+- Identifies suspicious path references
+
+**XDG Autostart**:
+- ~/.config/autostart
+- /etc/xdg/autostart
+- Scans .desktop files for suspicious executables
+
+---
+
+## Killing Capabilities
+
+### 1. Native Kernel Kill (ss -K)
+
+**Method**: Uses kernel socket destruction via `ss -K`
+
+**Advantages**:
+- Fastest method (kernel-level operation)
+- No process memory access required
+- Stealthy (no ptrace attachment)
+- No risk of process corruption
+
+**Limitations**:
+- Linux-only
+- Cannot kill LISTEN sockets
+- Requires `ss` utility
+
+**Usage**:
 ```bash
-sudo python3 tcp_killer.py 10.31.33.7:50246 93.184.216.34:443
-
-```
-
-**Kill UDP / QUIC Connections**
-Shut down any UDP connection on port 443.
-
-```bash
-sudo python3 tcp_killer.py :443 --udp
-
-```
-
-**Persistence Mode (Anti-Auto-Restart)**
-Continuously monitor for a connection on port 8080 and kill it every 0.5 seconds.
-
-```bash
-sudo python3 tcp_killer.py :8080 --watch 0.5
-
+sudo python3 net_sentinel.py --kill :8080 --method native
 ```
 
 ---
 
-## 2. proc_scanner.py (Auxiliary)
+### 2. Frida Injection Kill
 
-A forensic utility designed to identify hidden, malicious, or anomalous processes that may need to be targeted by `tcp_killer`. It bypasses standard tools like `ps` to inspect `/proc` directly.
+**Method**: Injects `shutdown()` syscall into target process
 
-### Features
+**Advantages**:
+- Surgical precision (specific socket only)
+- Works on LISTEN sockets
+- Cross-platform (Linux/macOS)
+- Graceful connection termination
 
-* **W^X Violation Detection:** Scans memory maps for segments that are both Writable and Executable (RWX), indicating potential code injection.
-* **Rootkit Hook Detection:** Scans process environments for `LD_PRELOAD` hooks.
-* **Ghost Process Detection:** Flags binaries that have been deleted from disk but are still running.
-* **Swap Inspection:** Identifies processes hiding in Swap (high disk usage, low RAM).
-* **Baselining:** Saves a "known good" state to detect new processes over time.
+**Limitations**:
+- Requires Frida library
+- Process memory access required
+- May trigger security software
+- Slower than native method
 
-### Usage
-
-`sudo python3 proc_scanner.py [options]`
-
-#### Arguments
-
-| Argument | Description |
-| --- | --- |
-| `--scan` | View current anomalies (Deleted binaries, RWX memory, Swap hiding). |
-| `--all` | Show all processes with forensic details. |
-| `--baseline` | Establish the "Normal" warning baseline (saves to `process_baseline.json`). |
-| `--diff` | Compare current active processes to the Baseline. |
-
-#### Workflow Example
-
-1. **Identify:** Run scan to find a suspicious PID.
+**Usage**:
 ```bash
-sudo python3 proc_scanner.py --scan
-# Output: PID 1337 [RWX_ANONYMOUS] /tmp/miner
-
+sudo python3 net_sentinel.py --kill :8080 --method injection
 ```
 
-
-2. **Terminate:** Use `tcp_killer` to kill the process.
-```bash
-sudo python3 tcp_killer.py --kill-process (target port or use kill -9 1337)
-
-```
-
-
+**Technical Details**:
+- Resolves `shutdown()` function in libc/libsystem
+- Creates NativeFunction wrapper
+- Calls `shutdown(fd, SHUT_RDWR)`
+- Detaches cleanly
 
 ---
 
-## Dependencies
+### 3. Process Termination
 
-### Python 3 & Lsof
+**Method**: SIGKILL entire process and children
 
-Ensure you have Python 3 and `lsof` installed.
+**Advantages**:
+- Guaranteed kill
+- Removes all connections at once
+- Kills entire process tree
+- No recovery possible
 
+**Limitations**:
+- Most disruptive
+- May affect legitimate functionality
+- No graceful shutdown
+
+**Usage**:
 ```bash
-# Ubuntu/Debian
-sudo apt-get install python3 lsof
-
-# macOS
-brew install lsof
-
+sudo python3 net_sentinel.py --kill :8080 --method process
 ```
 
-### Frida
+**Process Tree Handling**:
+1. Identifies all child processes via PPID
+2. Kills children first (depth-first)
+3. Kills parent process last
+4. Uses SIGKILL (cannot be caught)
 
-`tcp_killer.py` uses [frida](https://www.frida.re/) for dynamic binary instrumentation (socket injection).
+---
+
+### 4. Firewall Blocking
+
+**Method**: IPTables/IP6Tables rules
+
+**Advantages**:
+- Persistent blocking (survives reconnect attempts)
+- Network-level enforcement
+- Blocks all future connections to target
+- Dual-stack support (IPv4/IPv6)
+
+**Limitations**:
+- Rules persist until manually removed
+- Affects all processes
+- Requires iptables utilities
+
+**Usage**:
+```bash
+sudo python3 net_sentinel.py --kill 192.168.1.100:8080 --method block
+```
+
+**Firewall Logic**:
+1. Checks existing rules to avoid duplicates
+2. Inserts OUTPUT chain rule: `-j DROP`
+3. Separate handling for IPv4 (iptables) and IPv6 (ip6tables)
+4. Refuses to block localhost/wildcard IPs
+
+**Rule Removal**:
+```bash
+# View rules
+sudo iptables -L OUTPUT -n --line-numbers
+
+# Remove rule
+sudo iptables -D OUTPUT <line_number>
+```
+
+---
+
+### 5. Kill Verification
+
+All kill methods support verification:
+1. Re-scans network connections
+2. Checks if target still exists
+3. Reports success/failure
+4. Automatic verification in "auto" mode
+
+---
+
+### 6. Watch Mode (Persistence Counter)
+
+Continuous monitoring to handle auto-reconnecting processes:
+
+```bash
+sudo python3 net_sentinel.py --kill :8080 --watch 0.5
+```
+
+**Features**:
+- Loops indefinitely (Ctrl+C to stop)
+- Configurable interval (seconds)
+- Kills connections as they appear
+- Tracks kill statistics
+
+**Use Cases**:
+- Malware that auto-reconnects
+- Persistent C2 channels
+- Auto-restarting backdoors
+- Testing connection resilience
+
+---
+
+## Usage Examples
+
+### Forensic Scanning
+
+**Basic Scan** (suspicious processes only):
+```bash
+sudo python3 net_sentinel.py --scan
+```
+
+**Full Scan** (all processes):
+```bash
+sudo python3 net_sentinel.py --scan --all
+```
+
+**Establish Baseline**:
+```bash
+# Process baseline
+sudo python3 net_sentinel.py --baseline
+
+# Network baseline
+sudo python3 net_sentinel.py --network-baseline
+```
+
+**Compare to Baseline** (diff mode):
+After establishing baseline, run normal scan to see deviations.
+
+---
+
+### Connection Termination
+
+**Kill Local Port** (all connections):
+```bash
+sudo python3 net_sentinel.py --kill :8080
+```
+
+**Kill Specific Connection**:
+```bash
+sudo python3 net_sentinel.py --kill :8080 --remote 192.168.1.100:443
+```
+
+**Kill UDP Connections**:
+```bash
+sudo python3 net_sentinel.py --kill :53 --protocol UDP
+```
+
+**Persistent Kill Loop**:
+```bash
+sudo python3 net_sentinel.py --kill :8080 --watch 0.5
+```
+
+**Nuclear Option** (kill process):
+```bash
+sudo python3 net_sentinel.py --kill :22 --method process
+```
+
+**Block with Firewall**:
+```bash
+sudo python3 net_sentinel.py --kill :443 --remote 93.184.216.34:443 --method block
+```
+
+---
+
+### Real-World Scenarios
+
+#### Scenario 1: Cryptocurrency Miner Detection
+
+```bash
+# 1. Full scan
+sudo python3 net_sentinel.py --scan
+
+# Output shows:
+# PID 1337 | HIGH_THREADS:150 | HIGH_CPU | SUSPICIOUS_PATH:/tmp/xmrig
+
+# 2. Check network connections
+# Shows beaconing to mining pool every 30 seconds
+
+# 3. Kill the miner
+sudo python3 net_sentinel.py --kill :3333 --method process
+
+# 4. Block mining pool
+sudo python3 net_sentinel.py --kill :3333 --remote pool.minexmr.com:3333 --method block
+```
+
+---
+
+#### Scenario 2: Backdoor Detection
+
+```bash
+# 1. Scan for listeners
+sudo python3 net_sentinel.py --scan
+
+# Output shows:
+# PID 666 | LISTEN_ALL_INTERFACES:31337 | DELETED_BINARY | RWX_ANONYMOUS
+
+# 2. Establish baseline for future detection
+sudo python3 net_sentinel.py --baseline
+
+# 3. Kill the backdoor
+sudo python3 net_sentinel.py --kill :31337 --method process
+
+# 4. Monitor for reconnection
+sudo python3 net_sentinel.py --kill :31337 --watch 1.0
+```
+
+---
+
+#### Scenario 3: C2 Beaconing Detection
+
+```bash
+# 1. Run scan to detect beaconing
+sudo python3 net_sentinel.py --scan
+
+# Output shows:
+# BEACONING DETECTED: 203.0.113.5:443 - Interval: 15.2s (PID: 2468)
+
+# 2. Kill connection
+sudo python3 net_sentinel.py --kill :443 --remote 203.0.113.5:443
+
+# 3. Block C2 server permanently
+sudo python3 net_sentinel.py --kill :443 --remote 203.0.113.5:443 --method block
+```
+
+---
+
+#### Scenario 4: Process Injection Detection
+
+```bash
+# 1. Scan memory for injection
+sudo python3 net_sentinel.py --scan
+
+# Output shows:
+# PID 1234 | RWX_ANONYMOUS | HIGH_ANON_MEM:85%
+
+# 2. Examine the process
+ls -la /proc/1234/exe
+cat /proc/1234/cmdline
+
+# 3. If malicious, kill entire process tree
+sudo python3 net_sentinel.py --kill :8080 --method process
+```
+
+---
+
+## Technical Architecture
+
+### Data Sources
+
+```
+/proc/[pid]/stat       - CPU, state, threads
+/proc/[pid]/status     - Memory, capabilities, UIDs
+/proc/[pid]/fd/        - Open file descriptors
+/proc/[pid]/maps       - Memory mappings
+/proc/[pid]/smaps      - Detailed memory info
+/proc/[pid]/exe        - Binary path (symlink)
+/proc/[pid]/cmdline    - Command line arguments
+/proc/[pid]/environ    - Environment variables
+/proc/[pid]/cwd        - Working directory
+
+/proc/net/tcp          - TCP connections (IPv4)
+/proc/net/tcp6         - TCP connections (IPv6)
+/proc/net/udp          - UDP sockets (IPv4)
+/proc/net/udp6         - UDP sockets (IPv6)
+```
+
+### External Utilities
+
+```bash
+ss          - Socket statistics (native kill)
+lsof        - List open files (connection tracking)
+iptables    - Firewall rules (IPv4 blocking)
+ip6tables   - Firewall rules (IPv6 blocking)
+systemctl   - Systemd unit management
+crontab     - Cron job listing
+```
+
+### Python Modules
+
+```python
+frida       - Dynamic instrumentation (optional)
+os, sys     - System interaction
+pwd         - User database
+json        - Baseline storage
+threading   - Async injection
+socket      - Address parsing
+subprocess  - External command execution
+signal      - Process signaling
+```
+
+---
+
+## Safety Features
+
+### Process Whitelist
+
+Automatically protects critical system processes:
+- systemd, init
+- sshd (don't lock yourself out)
+- dhclient, NetworkManager
+- dbus-daemon
+- systemd-resolved, systemd-networkd
+
+**Bypass whitelist**:
+```python
+# Edit PROCESS_WHITELIST in source code
+PROCESS_WHITELIST = {}  # Empty set = no protection
+```
+
+### Localhost Protection
+
+Refuses to block localhost IPs in firewall:
+- 127.0.0.1 (IPv4 loopback)
+- ::1 (IPv6 loopback)
+- 0.0.0.0 (wildcard)
+- :: (IPv6 wildcard)
+
+### Graceful Degradation
+
+Works even if tools are missing:
+- No `ss`: Falls back to Frida injection
+- No Frida: Falls back to process kill
+- No iptables: Skips firewall blocking
+- Continues operation with warnings
+
+---
+
+## Performance Considerations
+
+### Scan Performance
+
+- **Process scan**: ~0.1ms per process
+- **Memory scan**: ~1ms per process
+- **Network scan**: ~50ms (all connections)
+- **Full scan (1000 processes)**: ~2-3 seconds
+
+### Optimization Tips
+
+1. Use `--all` sparingly (shows everything)
+2. Establish baselines offline (lower runtime overhead)
+3. Watch mode intervals: 0.5s minimum recommended
+4. Network baseline: Re-generate weekly
+
+---
+
+## Limitations & Known Issues
+
+### Platform Support
+
+- **Linux**: Full support (all features)
+- **macOS**: Partial support:
+  - No native kill (ss -K)
+  - No iptables (use pfctl manually)
+  - Frida injection works
+  - Process forensics works
+
+### Root Requirements
+
+Most features require root:
+- Reading other users' /proc data
+- Socket termination
+- Firewall rule modification
+- Process killing
+
+### Container/Namespace Limitations
+
+- Cannot see processes in other namespaces
+- Container networking may be isolated
+- Docker processes may not be visible
+
+### Kernel Rootkits
+
+This tool operates in userland only:
+- Cannot detect kernel-level rootkits
+- Cannot verify syscall table integrity
+- Cannot scan kernel memory
+
+---
+
+## Troubleshooting
+
+### "Frida not available"
 
 ```bash
 pip3 install frida-tools frida
-
 ```
+
+### "Permission denied" errors
+
+```bash
+sudo python3 net_sentinel.py ...
+```
+
+### "ss: command not found"
+
+```bash
+# Ubuntu/Debian
+sudo apt install iproute2
+
+# Or use --method injection
+```
+
+### Kill verification fails
+
+Some processes immediately reconnect. Use watch mode:
+```bash
+sudo python3 net_sentinel.py --kill :8080 --watch 0.5
+```
+
+### IPTables rules persist
+
+```bash
+# List rules
+sudo iptables -L OUTPUT -n --line-numbers
+
+# Delete rule
+sudo iptables -D OUTPUT <line_number>
+
+# Flush all rules (dangerous!)
+sudo iptables -F OUTPUT
+```
+
+---
+
+## Contributing
+
+Contributions welcome. Please focus on:
+- Additional detection heuristics
+- New persistence mechanisms
+- Platform-specific optimizations
+- Performance improvements
+
+---
+
+## License
+
+Apache License, Version 2.0
+
+Original tcp_killer by Jason Geffner (Google)
+Enhanced by NET SENTINEL v5.0 development team
+
+---
 
 ## Disclaimer
 
-This is not an official Google product. Use responsibly and only on systems you own or have permission to manage.
-
-```
-
-```
+This tool is for authorized security testing and system administration only. Unauthorized use may violate computer fraud and abuse laws. Use responsibly and only on systems you own or have explicit permission to manage.
